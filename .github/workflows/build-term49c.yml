@@ -1,0 +1,44 @@
+name: Build Term49C
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build unsigned BAR
+        shell: bash
+        run: |
+          chmod +x scripts/docker-build.sh
+          chmod +x scripts/container-build.sh
+          ./scripts/docker-build.sh
+
+      - name: Verify output
+        shell: bash
+        run: |
+          test -f Term49C.bar
+          ls -lh Term49C.bar
+          sha256sum Term49C.bar
+
+      - name: Upload BAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: Term49C-unsigned
+          path: Term49C.bar
+          if-no-files-found: error
+          retention-days: 30
