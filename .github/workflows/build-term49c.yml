@@ -2,46 +2,137 @@ name: Build Term49C
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - "src/**"
+      - "external/**"
+      - "scripts/**"
+      - "share/**"
+      - "icons/**"
+      - "patches/**"
+      - "Makefile"
+      - "bar-descriptor.xml"
+      - ".github/workflows/build-term49c.yml"
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Build unsigned Term49C BAR
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      - name: Checkout Term49C
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Build unsigned BAR
+      # Term49C 当前仓库缺少 external/lib 中的预编译库。
+      # 从官方 BerryFarm Term49 BAR 提取兼容版本。
+      - name: Restore BB10 shared libraries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+
+          mkdir -p external/lib
+          mkdir -p vendor-bar/unpacked
+
+          gh release download 0.4.1.7 \
+            --repo BerryFarm/Term49 \
+            --pattern "*.bar" \
+            --dir vendor-bar
+
+          BAR_FILE="$(find vendor-bar -type f -name '*.bar' | head -n 1)"
+
+          if [ -z "$BAR_FILE" ]; then
+            echo "No Term49 BAR was downloaded"
+            exit 1
+          fi
+
+          unzip -q "$BAR_FILE" -d vendor-bar/unpacked
+
+          CONFIG_LIB="$(find vendor-bar/unpacked -type f -name 'libconfig.so*' | head -n 1)"
+          SDL_LIB="$(find vendor-bar/unpacked -type f -name 'libSDL12.so*' | head -n 1)"
+          TCO_LIB="$(find vendor-bar/unpacked -type f -name 'libTouchControlOverlay.so*' | head -n 1)"
+
+          if [ -z "$CONFIG_LIB" ]; then
+            echo "libconfig was not found in the Term49 BAR"
+            exit 1
+          fi
+
+          if [ -z "$SDL_LIB" ]; then
+            echo "libSDL12 was not found in the Term49 BAR"
+            exit 1
+          fi
+
+          if [ -z "$TCO_LIB" ]; then
+            echo "libTouchControlOverlay was not found in the Term49 BAR"
+            exit 1
+          fi
+
+          cp "$CONFIG_LIB" external/lib/libconfig.so
+          cp "$SDL_LIB" external/lib/libSDL12.so
+          cp "$TCO_LIB" external/lib/libTouchControlOverlay.so
+
+          ls -lh external/lib
+          file external/lib/*.so
+
+      # Makefile 强制 include signing/bbpass。
+      # CI 只构建未签名 BAR，因此创建空配置即可。
+      - name: Prepare build workspace
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p signing
+          mkdir -p Device-Debug
+
+          touch signing/bbpass
+
+          chmod +x scripts/docker-build.sh
+          chmod +x scripts/container-build.sh
+          chmod +x scripts/build-sdl.sh
+
+          # Docker 镜像内的 admin 用户与 Actions runner UID 不同。
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+
+      # 使用 sdl 参数重新编译带 Q20 触控板补丁的 libSDL12。
+      - name: Build Term49C
         shell: bash
         env:
           BBNDK_IMAGE: delaya73/bbndk:latest
         run: |
-          chmod +x scripts/docker-build.sh
-          chmod +x scripts/container-build.sh
-          mkdir -p signing Device-Debug
-          
-          touch signing/bbpass
-      
-          chmod -R a+rwX "$GITHUB_WORKSPACE"
-      
-          ./scripts/docker-build.sh
+          set -euxo pipefail
+          ./scripts/docker-build.sh sdl
 
-      - name: Verify BAR
+      - name: Verify build output
         shell: bash
         run: |
-          test -s Term49C.bar
-          sha256sum Term49C.bar
+          set -euxo pipefail
 
-      - name: Upload BAR
+          test -s Device-Debug/Term49
+          test -s Term49C.bar
+
+          ls -lh Device-Debug/Term49
+          ls -lh Term49C.bar
+
+          file Device-Debug/Term49
+          sha256sum Term49C.bar | tee Term49C.bar.sha256
+
+      - name: Upload Term49C artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Term49C-unsigned
-          path: Term49C.bar
+          name: Term49C-unsigned-${{ github.sha }}
+          path: |
+            Term49C.bar
+            Term49C.bar.sha256
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
