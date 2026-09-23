@@ -41,7 +41,7 @@ BINARY_PATH	:= $(ASSET)/$(BINARY)
 SRCS := $(wildcard src/*.c)
 OBJS := $(SRCS:.c=.o )
 
-include ./signing/bbpass
+-include ./signing/bbpass
 
 .PHONY: all clean package-debug deploy launch-debug
 
