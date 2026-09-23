@@ -24,6 +24,12 @@ jobs:
         run: |
           chmod +x scripts/docker-build.sh
           chmod +x scripts/container-build.sh
+          mkdir -p signing Device-Debug
+          
+          touch signing/bbpass
+      
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+      
           ./scripts/docker-build.sh
 
       - name: Verify BAR
