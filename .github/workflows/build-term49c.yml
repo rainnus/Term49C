@@ -255,7 +255,6 @@ jobs:
 
               echo "Using BBNDK environment: $BBNDK_ENV"
 
-              # BBNDK 10.3.1 环境脚本不兼容 set -u
               set +u
               source "$BBNDK_ENV"
               set -u
@@ -265,15 +264,13 @@ jobs:
               command -v qcc
 
               echo "=== Building patched SDL ==="
-              chmod +x scripts/build-sdl.sh
-              scripts/build-sdl.sh
-
+              /bin/bash scripts/build-sdl.sh
+      
               echo "=== SDL build finished ==="
               test -s external/lib/libSDL12.so
               ls -lh external/lib/libSDL12.so
               file external/lib/libSDL12.so
             '
-
       # ------------------------------------------------------------
       # 验证补丁和 SDL 构建产物
       # ------------------------------------------------------------
