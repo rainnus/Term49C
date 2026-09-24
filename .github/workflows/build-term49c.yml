@@ -27,55 +27,49 @@ permissions:
 
 jobs:
   build:
-    name: Build unsigned Term49C BAR with patched SDL
+    name: Build unsigned Term49C BAR
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
-      # ============================================================
-      # 1. Checkout
-      #
-      # Term49C 的 SDL / libconfig / TouchControlOverlay 都是 submodule。
-      # 必须 recursive，否则 ./scripts/docker-build.sh sdl
-      # 无法从真正的 term48 SDL 源码重新编译触控板补丁版 SDL。
-      # ============================================================
-      - name: Checkout Term49C with submodules
+
+      # ------------------------------------------------------------
+      # Checkout + submodules
+      # ------------------------------------------------------------
+      - name: Checkout Term49C
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Verify submodules
+      - name: Verify repository
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "=== Git submodules ==="
+          echo "=== Commit ==="
+          git rev-parse HEAD
+
+          echo "=== Submodules ==="
           git submodule status
 
-          echo "=== SDL tree ==="
+          echo "=== SDL ==="
           test -d SDL
           test -n "$(find SDL -type f -print -quit)"
-          ls -la SDL | head -30
 
           echo "=== Trackpad patch ==="
           test -s patches/sdl-term48-trackpad.patch
           ls -lh patches/sdl-term48-trackpad.patch
 
-      # ============================================================
-      # 2. 恢复 Term49 运行时资源
+
+      # ------------------------------------------------------------
+      # 从官方 Term49 BAR 恢复 Term49C 仓库缺少的 runtime
       #
-      # 这里只从官方 Term49 BAR 提取：
-      #   libconfig
-      #   libTouchControlOverlay
-      #   share/root
-      #
-      # !!! 不再复制 libSDL12.so !!!
-      #
-      # SDL 必须由下面的 docker-build.sh sdl 自己重新编译，
-      # 否则可能把 Term49 原版 SDL 打进 Term49C。
-      # ============================================================
-      - name: Restore Term49 runtime except SDL
+      # 注意：
+      # 不提取 SDL！
+      # SDL 后面由源码 + Q20 trackpad patch 重新编译。
+      # ------------------------------------------------------------
+      - name: Restore Term49 runtime and libraries
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -124,17 +118,17 @@ jobs:
           )"
 
           if [ -z "$CONFIG_LIB" ]; then
-            echo "libconfig was not found in upstream BAR"
+            echo "libconfig was not found"
             exit 1
           fi
 
           if [ -z "$TCO_LIB" ]; then
-            echo "libTouchControlOverlay was not found in upstream BAR"
+            echo "libTouchControlOverlay was not found"
             exit 1
           fi
 
           if [ -z "$ROOT_DIR" ]; then
-            echo "Runtime root directory was not found in upstream BAR"
+            echo "Runtime root directory was not found"
             exit 1
           fi
 
@@ -150,21 +144,17 @@ jobs:
           test -s external/lib/libTouchControlOverlay.so
           test -n "$(find share/root -type f -print -quit)"
 
-          # 重要：
-          # 删除任何可能存在的旧 SDL。
-          # 后面必须由 build-sdl.sh / docker-build.sh sdl 重新生成。
+          # 不允许旧 Term49 SDL 混进来
           rm -f external/lib/libSDL12.so
           rm -f external/lib/libSDL12.so.*
 
-          echo "=== Restored libraries ==="
+          echo "=== external/lib before SDL build ==="
           ls -lh external/lib
 
-          echo "=== Restored runtime ==="
-          find share/root -maxdepth 3 -type f -print
 
-      # ============================================================
-      # 3. Build workspace
-      # ============================================================
+      # ------------------------------------------------------------
+      # Prepare
+      # ------------------------------------------------------------
       - name: Prepare build workspace
         shell: bash
         run: |
@@ -181,55 +171,120 @@ jobs:
 
           chmod -R a+rwX "$GITHUB_WORKSPACE"
 
-      # ============================================================
-      # 4. 强制重新编译 patched SDL
+
+      # ------------------------------------------------------------
+      # 关键步骤
       #
-      # 关键就是这个 sdl 参数：
+      # 不再调用：
       #
-      # SDL term48 source
-      #        +
-      # patches/sdl-term48-trackpad.patch
-      #        ↓
-      # external/lib/libSDL12.so
-      #        ↓
-      # Term49C.bar
-      # ============================================================
-      - name: Build Term49C with Q20 trackpad SDL
+      #   docker-build.sh sdl
+      #
+      # 而是直接进入 BBNDK Docker，
+      # source NDK 环境，
+      # 手动执行 build-sdl.sh。
+      #
+      # 这样 SDL 一定在 Term49 之前生成。
+      # ------------------------------------------------------------
+      - name: Build patched Q20 SDL
         shell: bash
         env:
           BBNDK_IMAGE: delaya73/bbndk:latest
         run: |
           set -euxo pipefail
 
-          echo "=== Before SDL build ==="
+          echo "=== Starting dedicated SDL build ==="
 
-          if [ -e external/lib/libSDL12.so ]; then
-            echo "ERROR: libSDL12.so already exists before patched SDL build"
-            exit 1
-          fi
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$GITHUB_WORKSPACE":/work \
+            -w /work \
+            "$BBNDK_IMAGE" \
+            /bin/bash -lc '
+              set -euxo pipefail
 
-          ./scripts/docker-build.sh sdl
+              BBNDK_ENV="$(
+                ls \
+                  /home/*/bin/bbndk/bbndk-env*.sh \
+                  /opt/bbndk/bbndk-env*.sh \
+                  /root/bbndk/bbndk-env*.sh \
+                  2>/dev/null \
+                  | head -n 1
+              )"
 
-      # ============================================================
-      # 5. 确认 patched SDL 确实生成
-      # ============================================================
+              if [ -z "$BBNDK_ENV" ]; then
+                echo "Could not locate BBNDK environment"
+                exit 1
+              fi
+
+              echo "Using NDK environment:"
+              echo "$BBNDK_ENV"
+
+              source "$BBNDK_ENV"
+
+              echo "=== Building patched SDL ==="
+
+              scripts/build-sdl.sh
+
+              echo "=== SDL build finished ==="
+
+              test -s external/lib/libSDL12.so
+
+              ls -lh external/lib/libSDL12.so
+              file external/lib/libSDL12.so
+            '
+
+
+      # ------------------------------------------------------------
+      # 检查 patch 是否真的进 SDL 源码
+      # ------------------------------------------------------------
       - name: Verify patched SDL
         shell: bash
         run: |
           set -euxo pipefail
 
+          echo "=== Check trackpad code ==="
+
+          grep -n "handleTrackpadEvent" \
+            SDL/src/video/playbook/SDL_playbookevents.c
+
+          echo "=== Check SDL output ==="
+
           test -s external/lib/libSDL12.so
 
-          echo "=== Newly compiled SDL ==="
           ls -lh external/lib/libSDL12.so
           file external/lib/libSDL12.so
+
           sha256sum external/lib/libSDL12.so \
             | tee libSDL12.so.sha256
 
-      # ============================================================
-      # 6. 验证最终 BAR
-      # ============================================================
-      - name: Verify Term49C BAR
+
+      # ------------------------------------------------------------
+      # 现在 SDL 已经肯定存在
+      #
+      # 这里执行普通 build，不再传 sdl
+      # ------------------------------------------------------------
+      - name: Build Term49C
+        shell: bash
+        env:
+          BBNDK_IMAGE: delaya73/bbndk:latest
+        run: |
+          set -euxo pipefail
+
+          echo "=== Libraries before Term49 build ==="
+
+          ls -lh external/lib
+
+          test -s external/lib/libSDL12.so
+          test -s external/lib/libconfig.so
+          test -s external/lib/libTouchControlOverlay.so
+
+          ./scripts/docker-build.sh
+
+
+      # ------------------------------------------------------------
+      # 检查程序和 BAR
+      # ------------------------------------------------------------
+      - name: Verify output
         shell: bash
         run: |
           set -euxo pipefail
@@ -237,33 +292,30 @@ jobs:
           test -s Device-Debug/Term49
           test -s Term49C.bar
 
-          echo "=== Compiled executable ==="
+          echo "=== Executable ==="
+
           ls -lh Device-Debug/Term49
           file Device-Debug/Term49
 
-          echo "=== Generated BAR ==="
+          echo "=== BAR ==="
+
           ls -lh Term49C.bar
 
           sha256sum Term49C.bar \
             | tee Term49C.bar.sha256
 
-      # ============================================================
-      # 7. 最重要的验证：
-      #
-      # 把 BAR 解开，再检查 BAR 内真正打进去的 SDL
-      # 是否和刚刚重新编译的 patched SDL 完全一致。
-      #
-      # 防止出现：
-      #   external/lib 是新版
-      #   但 BAR 里却还是旧版
-      # ============================================================
-      - name: Verify SDL packaged inside BAR
+
+      # ------------------------------------------------------------
+      # 解开最终 BAR
+      # 检查里面实际包含的 SDL 是不是我们刚刚重新编的
+      # ------------------------------------------------------------
+      - name: Verify SDL inside BAR
         shell: bash
         run: |
           set -euxo pipefail
 
           rm -rf verify-bar
-          mkdir -p verify-bar
+          mkdir verify-bar
 
           unzip -q Term49C.bar -d verify-bar
 
@@ -275,55 +327,67 @@ jobs:
           )"
 
           if [ -z "$BAR_SDL" ]; then
-            echo "ERROR: libSDL12.so was not packaged inside Term49C.bar"
-            find verify-bar -maxdepth 5 -type f -print
+            echo "ERROR: libSDL12.so missing from BAR"
+
+            find verify-bar \
+              -maxdepth 5 \
+              -type f \
+              -print
+
             exit 1
           fi
 
-          echo "SDL packaged in BAR:"
-          ls -lh "$BAR_SDL"
-
-          echo "=== Source SDL hash ==="
+          echo "=== SDL generated from source ==="
           sha256sum external/lib/libSDL12.so
 
-          echo "=== BAR SDL hash ==="
+          echo "=== SDL packaged in BAR ==="
           sha256sum "$BAR_SDL"
 
           cmp \
             external/lib/libSDL12.so \
             "$BAR_SDL"
 
-          echo "OK: patched SDL in BAR matches newly compiled SDL"
+          echo
+          echo "============================================"
+          echo "OK: patched Q20 SDL is packaged in Term49C"
+          echo "============================================"
 
-      # ============================================================
-      # 8. Build info
-      # ============================================================
-      - name: Create build information
+
+      # ------------------------------------------------------------
+      # Build metadata
+      # ------------------------------------------------------------
+      - name: Create build info
         shell: bash
         run: |
           set -euxo pipefail
 
           {
-            echo "Term49C build"
+            echo "Term49C Q20 trackpad build"
             echo
-            echo "Commit:"
+
+            echo "Main commit:"
             git rev-parse HEAD
             echo
+
             echo "Submodules:"
             git submodule status
             echo
-            echo "Term49C BAR:"
+
+            echo "BAR:"
             sha256sum Term49C.bar
             echo
-            echo "Patched SDL:"
+
+            echo "SDL:"
             sha256sum external/lib/libSDL12.so
+
           } > build-info.txt
 
           cat build-info.txt
 
-      # ============================================================
-      # 9. Upload
-      # ============================================================
+
+      # ------------------------------------------------------------
+      # Upload
+      # ------------------------------------------------------------
       - name: Upload Term49C artifact
         uses: actions/upload-artifact@v4
         with:
