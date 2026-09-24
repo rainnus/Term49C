@@ -14,10 +14,17 @@ on:
       - "icons/**"
       - "patches/**"
       - "scripts/**"
+
+      # 同时匹配子模块 gitlink 和子模块目录内容
+      - "SDL"
       - "SDL/**"
+      - "TouchControlOverlay"
       - "TouchControlOverlay/**"
+      - "libconfig"
       - "libconfig/**"
+
       - ".gitmodules"
+      - ".gitattributes"
       - "Makefile"
       - "bar-descriptor.xml"
       - ".github/workflows/build-term49c.yml"
@@ -31,16 +38,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
-    steps:
+    env:
+      BBNDK_IMAGE: delaya73/bbndk:latest
+      BBNDK_ENV: /home/admin/bin/bbndk/bbndk-env_10_3_1_995.sh
 
+    steps:
       # ------------------------------------------------------------
-      # Checkout + submodules
+      # Checkout
       # ------------------------------------------------------------
       - name: Checkout Term49C
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
+          lfs: true
 
       - name: Verify repository
         shell: bash
@@ -61,13 +72,23 @@ jobs:
           test -s patches/sdl-term48-trackpad.patch
           ls -lh patches/sdl-term48-trackpad.patch
 
+          echo "=== Required font ==="
+          if [ ! -s external/fonts/CascadiaMonoPL-Regular.ttf ]; then
+            echo "::error::Missing external/fonts/CascadiaMonoPL-Regular.ttf"
+            echo "Available font files:"
+            find . -type f \( -iname '*.ttf' -o -iname '*.otf' \) -print
+            exit 1
+          fi
+
+          ls -lh external/fonts/CascadiaMonoPL-Regular.ttf
+
+          echo "=== Git LFS status ==="
+          git lfs ls-files || true
 
       # ------------------------------------------------------------
-      # 从官方 Term49 BAR 恢复 Term49C 仓库缺少的 runtime
+      # 从官方 Term49 BAR 恢复仓库没有包含的运行文件和共享库。
       #
-      # 注意：
-      # 不提取 SDL！
-      # SDL 后面由源码 + Q20 trackpad patch 重新编译。
+      # SDL 不从 BAR 提取，后面使用源码和 Q20 补丁重新编译。
       # ------------------------------------------------------------
       - name: Restore Term49 runtime and libraries
         shell: bash
@@ -76,66 +97,89 @@ jobs:
         run: |
           set -euxo pipefail
 
+          rm -rf vendor-bar
+          mkdir -p vendor-bar/unpacked
           mkdir -p external/lib
           mkdir -p share/root
-          mkdir -p vendor-bar/unpacked
 
           gh release download 0.4.1.7 \
             --repo BerryFarm/Term49 \
             --pattern "*.bar" \
             --dir vendor-bar
 
-          BAR_FILE="$(find vendor-bar -type f -name '*.bar' | head -n 1)"
+          mapfile -t BAR_FILES < <(
+            find vendor-bar \
+              -maxdepth 1 \
+              -type f \
+              -name '*.bar' \
+              -print
+          )
 
-          if [ -z "$BAR_FILE" ]; then
-            echo "No Term49 BAR was downloaded"
+          if [ "${#BAR_FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one upstream BAR, found ${#BAR_FILES[@]}"
+            printf '%s\n' "${BAR_FILES[@]}"
             exit 1
           fi
 
-          echo "Using upstream BAR: $BAR_FILE"
+          BAR_FILE="${BAR_FILES[0]}"
+
+          echo "=== Upstream BAR ==="
+          ls -lh "$BAR_FILE"
+          sha256sum "$BAR_FILE"
 
           unzip -q "$BAR_FILE" -d vendor-bar/unpacked
 
-          CONFIG_LIB="$(
+          mapfile -t CONFIG_LIBS < <(
             find vendor-bar/unpacked \
               -type f \
               -name 'libconfig.so*' \
-              | head -n 1
-          )"
+              -print
+          )
 
-          TCO_LIB="$(
+          mapfile -t TCO_LIBS < <(
             find vendor-bar/unpacked \
               -type f \
               -name 'libTouchControlOverlay.so*' \
-              | head -n 1
-          )"
+              -print
+          )
 
-          ROOT_DIR="$(
+          mapfile -t ROOT_DIRS < <(
             find vendor-bar/unpacked \
               -type d \
               -name root \
-              | head -n 1
-          )"
+              -print
+          )
 
-          if [ -z "$CONFIG_LIB" ]; then
-            echo "libconfig was not found"
+          if [ "${#CONFIG_LIBS[@]}" -lt 1 ]; then
+            echo "::error::libconfig was not found in upstream BAR"
             exit 1
           fi
 
-          if [ -z "$TCO_LIB" ]; then
-            echo "libTouchControlOverlay was not found"
+          if [ "${#TCO_LIBS[@]}" -lt 1 ]; then
+            echo "::error::libTouchControlOverlay was not found in upstream BAR"
             exit 1
           fi
 
-          if [ -z "$ROOT_DIR" ]; then
-            echo "Runtime root directory was not found"
+          if [ "${#ROOT_DIRS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one runtime root directory, found ${#ROOT_DIRS[@]}"
+            printf '%s\n' "${ROOT_DIRS[@]}"
             exit 1
           fi
 
-          cp "$CONFIG_LIB" \
+          CONFIG_LIB="${CONFIG_LIBS[0]}"
+          TCO_LIB="${TCO_LIBS[0]}"
+          ROOT_DIR="${ROOT_DIRS[0]}"
+
+          echo "Using libconfig: $CONFIG_LIB"
+          echo "Using TouchControlOverlay: $TCO_LIB"
+          echo "Using runtime root: $ROOT_DIR"
+
+          install -m 0644 \
+            "$CONFIG_LIB" \
             external/lib/libconfig.so
 
-          cp "$TCO_LIB" \
+          install -m 0644 \
+            "$TCO_LIB" \
             external/lib/libTouchControlOverlay.so
 
           cp -a "$ROOT_DIR"/. share/root/
@@ -144,13 +188,15 @@ jobs:
           test -s external/lib/libTouchControlOverlay.so
           test -n "$(find share/root -type f -print -quit)"
 
-          # 不允许旧 Term49 SDL 混进来
+          # 不允许上游 BAR 中的旧 SDL 参与最终构建
           rm -f external/lib/libSDL12.so
           rm -f external/lib/libSDL12.so.*
 
-          echo "=== external/lib before SDL build ==="
+          echo "=== Restored libraries ==="
           ls -lh external/lib
 
+          echo "=== Restored runtime ==="
+          find share/root -maxdepth 4 -type f -print | sort
 
       # ------------------------------------------------------------
       # Prepare
@@ -163,32 +209,29 @@ jobs:
           mkdir -p signing
           mkdir -p Device-Debug
 
-          touch signing/bbpass
+          # Makefile 会包含该文件；无签名构建使用空文件
+          : > signing/bbpass
 
           chmod +x scripts/docker-build.sh
           chmod +x scripts/container-build.sh
           chmod +x scripts/build-sdl.sh
 
-          chmod -R a+rwX "$GITHUB_WORKSPACE"
-
+          # BBNDK 容器用户可能与 GitHub runner UID 不同
+          chmod -R a+rwX \
+            external \
+            share \
+            signing \
+            Device-Debug \
+            SDL
 
       # ------------------------------------------------------------
-      # 关键步骤
+      # 在 BBNDK 容器中编译打过 Q20 trackpad 补丁的 SDL。
       #
-      # 不再调用：
-      #
-      #   docker-build.sh sdl
-      #
-      # 而是直接进入 BBNDK Docker，
-      # source NDK 环境，
-      # 手动执行 build-sdl.sh。
-      #
-      # 这样 SDL 一定在 Term49 之前生成。
+      # 旧版 bbndk-env 脚本直接访问 $1，因此 source 时必须临时关闭
+      # nounset，否则会出现 "$1: unbound variable"。
       # ------------------------------------------------------------
       - name: Build patched Q20 SDL
         shell: bash
-        env:
-          BBNDK_IMAGE: delaya73/bbndk:latest
         run: |
           set -euxo pipefail
 
@@ -200,84 +243,87 @@ jobs:
             -w /work \
             "$BBNDK_IMAGE" \
             /bin/bash -lc '
-              set -euxo pipefail
+              set -eo pipefail
+              set -x
 
               BBNDK_ENV="/home/admin/bin/bbndk/bbndk-env_10_3_1_995.sh"
 
               if [ ! -f "$BBNDK_ENV" ]; then
-                echo "ERROR: BBNDK environment not found:"
-                echo "$BBNDK_ENV"
+                echo "ERROR: BBNDK environment not found: $BBNDK_ENV"
                 exit 1
               fi
 
-              echo "Using BBNDK environment:"
-              echo "$BBNDK_ENV"
+              echo "Using BBNDK environment: $BBNDK_ENV"
 
+              # BBNDK 10.3.1 环境脚本不兼容 set -u
+              set +u
               source "$BBNDK_ENV"
+              set -u
+
+              echo "QNX_HOST=$QNX_HOST"
+              echo "QNX_TARGET=$QNX_TARGET"
+              command -v qcc
 
               echo "=== Building patched SDL ==="
-
               chmod +x scripts/build-sdl.sh
               scripts/build-sdl.sh
 
               echo "=== SDL build finished ==="
-
               test -s external/lib/libSDL12.so
-
               ls -lh external/lib/libSDL12.so
               file external/lib/libSDL12.so
             '
 
-
       # ------------------------------------------------------------
-      # 检查 patch 是否真的进 SDL 源码
+      # 验证补丁和 SDL 构建产物
       # ------------------------------------------------------------
       - name: Verify patched SDL
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "=== Check trackpad code ==="
+          echo "=== Check trackpad implementation ==="
 
-          grep -n "handleTrackpadEvent" \
+          if ! grep -n \
+            "handleTrackpadEvent" \
             SDL/src/video/playbook/SDL_playbookevents.c
+          then
+            echo "::error::Q20 trackpad code was not found in SDL source"
+            exit 1
+          fi
 
           echo "=== Check SDL output ==="
-
           test -s external/lib/libSDL12.so
-
           ls -lh external/lib/libSDL12.so
           file external/lib/libSDL12.so
 
           sha256sum external/lib/libSDL12.so \
             | tee libSDL12.so.sha256
 
-
       # ------------------------------------------------------------
-      # 现在 SDL 已经肯定存在
+      # 编译 Term49C
       #
-      # 这里执行普通 build，不再传 sdl
+      # SDL 已经生成，所以不向 docker-build.sh 传入 sdl 参数。
       # ------------------------------------------------------------
       - name: Build Term49C
         shell: bash
-        env:
-          BBNDK_IMAGE: delaya73/bbndk:latest
         run: |
           set -euxo pipefail
 
+          echo "=== Required assets before build ==="
+          test -s external/fonts/CascadiaMonoPL-Regular.ttf
+          test -n "$(find share/root -type f -print -quit)"
+
           echo "=== Libraries before Term49 build ==="
-
-          ls -lh external/lib
-
           test -s external/lib/libSDL12.so
           test -s external/lib/libconfig.so
           test -s external/lib/libTouchControlOverlay.so
+          ls -lh external/lib
 
           ./scripts/docker-build.sh
 
-
       # ------------------------------------------------------------
-      # 检查程序和 BAR
+      # 检查主程序和 BAR
       # ------------------------------------------------------------
       - name: Verify output
         shell: bash
@@ -288,49 +334,43 @@ jobs:
           test -s Term49C.bar
 
           echo "=== Executable ==="
-
           ls -lh Device-Debug/Term49
           file Device-Debug/Term49
 
           echo "=== BAR ==="
-
           ls -lh Term49C.bar
+          file Term49C.bar
 
           sha256sum Term49C.bar \
             | tee Term49C.bar.sha256
 
-
       # ------------------------------------------------------------
-      # 解开最终 BAR
-      # 检查里面实际包含的 SDL 是不是我们刚刚重新编的
+      # 解开最终 BAR，并确认使用的是本次构建的 SDL。
       # ------------------------------------------------------------
-      - name: Verify SDL inside BAR
+      - name: Verify SDL and font inside BAR
         shell: bash
         run: |
           set -euxo pipefail
 
           rm -rf verify-bar
-          mkdir verify-bar
+          mkdir -p verify-bar
 
           unzip -q Term49C.bar -d verify-bar
 
-          BAR_SDL="$(
+          mapfile -t BAR_SDL_FILES < <(
             find verify-bar \
               -type f \
               -name 'libSDL12.so*' \
-              | head -n 1
-          )"
-
-          if [ -z "$BAR_SDL" ]; then
-            echo "ERROR: libSDL12.so missing from BAR"
-
-            find verify-bar \
-              -maxdepth 5 \
-              -type f \
               -print
+          )
 
+          if [ "${#BAR_SDL_FILES[@]}" -lt 1 ]; then
+            echo "::error::libSDL12.so is missing from final BAR"
+            find verify-bar -maxdepth 6 -type f -print | sort
             exit 1
           fi
+
+          BAR_SDL="${BAR_SDL_FILES[0]}"
 
           echo "=== SDL generated from source ==="
           sha256sum external/lib/libSDL12.so
@@ -342,11 +382,36 @@ jobs:
             external/lib/libSDL12.so \
             "$BAR_SDL"
 
+          mapfile -t BAR_FONT_FILES < <(
+            find verify-bar \
+              -type f \
+              -name 'CascadiaMonoPL-Regular.ttf' \
+              -print
+          )
+
+          if [ "${#BAR_FONT_FILES[@]}" -lt 1 ]; then
+            echo "::error::CascadiaMonoPL-Regular.ttf is missing from final BAR"
+            find verify-bar -maxdepth 6 -type f -print | sort
+            exit 1
+          fi
+
+          BAR_FONT="${BAR_FONT_FILES[0]}"
+
+          echo "=== Source font ==="
+          sha256sum external/fonts/CascadiaMonoPL-Regular.ttf
+
+          echo "=== Font packaged in BAR ==="
+          sha256sum "$BAR_FONT"
+
+          cmp \
+            external/fonts/CascadiaMonoPL-Regular.ttf \
+            "$BAR_FONT"
+
           echo
           echo "============================================"
           echo "OK: patched Q20 SDL is packaged in Term49C"
+          echo "OK: Cascadia Mono PL font is packaged"
           echo "============================================"
-
 
       # ------------------------------------------------------------
       # Build metadata
@@ -368,17 +433,23 @@ jobs:
             git submodule status
             echo
 
+            echo "BBNDK image:"
+            echo "$BBNDK_IMAGE"
+            echo
+
             echo "BAR:"
             sha256sum Term49C.bar
             echo
 
             echo "SDL:"
             sha256sum external/lib/libSDL12.so
+            echo
 
+            echo "Font:"
+            sha256sum external/fonts/CascadiaMonoPL-Regular.ttf
           } > build-info.txt
 
           cat build-info.txt
-
 
       # ------------------------------------------------------------
       # Upload
