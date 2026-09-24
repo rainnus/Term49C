@@ -202,27 +202,22 @@ jobs:
             /bin/bash -lc '
               set -euxo pipefail
 
-              BBNDK_ENV="$(
-                ls \
-                  /home/*/bin/bbndk/bbndk-env*.sh \
-                  /opt/bbndk/bbndk-env*.sh \
-                  /root/bbndk/bbndk-env*.sh \
-                  2>/dev/null \
-                  | head -n 1
-              )"
+              BBNDK_ENV="/home/admin/bin/bbndk/bbndk-env_10_3_1_995.sh"
 
-              if [ -z "$BBNDK_ENV" ]; then
-                echo "Could not locate BBNDK environment"
+              if [ ! -f "$BBNDK_ENV" ]; then
+                echo "ERROR: BBNDK environment not found:"
+                echo "$BBNDK_ENV"
                 exit 1
               fi
 
-              echo "Using NDK environment:"
+              echo "Using BBNDK environment:"
               echo "$BBNDK_ENV"
 
               source "$BBNDK_ENV"
 
               echo "=== Building patched SDL ==="
 
+              chmod +x scripts/build-sdl.sh
               scripts/build-sdl.sh
 
               echo "=== SDL build finished ==="
