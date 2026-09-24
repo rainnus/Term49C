@@ -234,35 +234,47 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
+      
           echo "=== Starting dedicated SDL build ==="
-
+      
           docker run --rm \
             --platform linux/amd64 \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/bbndk-home \
             -v "$GITHUB_WORKSPACE":/work \
             -w /work \
             "$BBNDK_IMAGE" \
             /bin/bash -lc '
               set -eo pipefail
               set -x
-
+      
+              mkdir -p "$HOME"
+      
               BBNDK_ENV="/home/admin/bin/bbndk/bbndk-env_10_3_1_995.sh"
-
+      
               if [ ! -f "$BBNDK_ENV" ]; then
                 echo "ERROR: BBNDK environment not found: $BBNDK_ENV"
                 exit 1
               fi
-
-              echo "Using BBNDK environment: $BBNDK_ENV"
-
+      
               set +u
               source "$BBNDK_ENV"
               set -u
-
+      
               echo "QNX_HOST=$QNX_HOST"
               echo "QNX_TARGET=$QNX_TARGET"
               command -v qcc
-
+      
+              echo "=== Remove stale SDL configure outputs ==="
+              rm -f SDL/config.status
+              rm -f SDL/config.log
+              rm -f SDL/config.cache
+              rm -f SDL/Makefile
+      
+              find SDL -type f -name "*.o" -delete
+              find SDL -type f -name "*.lo" -delete
+              find SDL -type f -name "*.la" -delete
+      
               echo "=== Building patched SDL ==="
               /bin/bash scripts/build-sdl.sh
       
